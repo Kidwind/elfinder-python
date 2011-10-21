@@ -1,3 +1,4 @@
+# coding=UTF-8
 #!/usr/bin/env python
 #
 # Connector for elFinder File Manager
@@ -112,6 +113,18 @@ class connector():
 	httpResponse = None
 
 	def __init__(self, opts):
+		# append by Kidwind
+		# 由于 python 的地址传递特性，导致运行时修改了类相应的变量值（如：connector._request），
+		# 导致在创建新的 connector 实例时使用了上次运行实便的相应变量值（如：connector._request），
+		# 造成不可预知的错误，此处重新初始化实例的相应变量值。
+		# PS：原有的实现也许重新开了新的进程，类重新进行初始化，不存在这样的问题。
+		self._request = {}
+		self._response = {}
+		self._errorData = {}
+		self._form = {}
+		self.httpHeader = {}
+		# end append by Kidwind
+		
 		self._time = time.time()
 		t = datetime.fromtimestamp(self._time)
 		self._today = time.mktime(datetime(t.year, t.month, t.day).timetuple())
@@ -121,6 +134,15 @@ class connector():
 
 		for opt in opts:
 			self._options[opt] = opts.get(opt)
+		
+		# append by Kidwind
+		# 通过将地址转成 unicode 编码，使得 os.listdir 等方法将正确返回 unicode 编码的文件名，
+		# 得以支持中文。
+		# ps: os.listdir(path) 方法根据传入的 path 的编码类型返回特定编码的文件名列表，如果
+		#	 path为str类型，则返回的文件名列表均为str类型，不能正常支持中文。
+		self._options['URL'] = self.__toUtf8(self._options['URL'])
+		self._options['root'] = self.__toUtf8(self._options['root'])
+		# end append by Kidwind
 
 		self._options['URL'] = self._options['URL'].rstrip('/')
 		self._options['root'] = self._options['root'].rstrip(os.sep)
@@ -150,6 +172,12 @@ class connector():
 		for field in self.httpAllowedParameters:
 			if field in httpRequest:
 				self._request[field] = httpRequest[field]
+		# append by Kidwind
+		# django 的 request 对象仅取第一个值，因此无法进行批量操作
+		field = 'targets[]'
+		if field in httpRequest:
+			self._request[field] = httpRequest.getlist(field)
+		# end append by Kidwind
 
 		if rootOk is True:
 			if 'cmd' in self._request:
@@ -259,7 +287,7 @@ class connector():
 		else:
 			path = self._options['root']
 
-			if 'target' in self._request:
+			if 'target' in self._request and self._request['target']:   # change by Kidwind
 				target = self.__findDir(self._request['target'], None)
 				if not target:
 					self._response['error'] = 'Invalid parameters'
@@ -1037,6 +1065,10 @@ class connector():
 		cmd.append(archiveName)
 		for f in realFiles:
 			cmd.append(f)
+		# append By Kidwind
+		# 当 tar 命令中含有中文字符并为unicode编码时，tar无法解压缩，所以将命令列表的参数均转为GBK字符。
+		cmd = self.__listToByteStr(cmd)
+		# end append By Kidwind
 
 		curCwd = os.getcwd()
 		os.chdir(curDir)
@@ -1077,7 +1109,11 @@ class connector():
 		cmd = [arc['cmd']]
 		for a in arc['argc'].split():
 			cmd.append(a)
-		cmd.append(curFile)
+		cmd.append(os.path.basename(curFile))	   # change By Kidwind 仅取文件名，因为已经使用 os.chdir 转到了当前目录，无需再使用全路径，而且全路径时导致Windows系统下不能正常解压的Bug，也许是因为tar命令不支持Windows盘符路径。
+		# append By Kidwind
+		# 当 tar 命令中含有中文字符并为unicode编码时，tar无法解压缩，所以将命令列表的参数均转为GBK字符。
+		cmd = self.__listToByteStr(cmd)
+		# end append By Kidwind
 
 		curCwd = os.getcwd()
 		os.chdir(curDir)
@@ -1295,14 +1331,14 @@ class connector():
 	def __hash(self, path):
 		"""Hash of the path"""
 		m = hashlib.md5()
-		m.update(path)
+		m.update(self.__toByteStr(path))	 # change by Kidwind 通过 str(path) 将 path转换成原始字符串，避免 m 不能 update unicode编码的字符串
 		return str(m.hexdigest())
 
 
 	def __path2url(self, path):
 		curDir = path
 		length = len(self._options['root'])
-		url = str(self._options['URL'] + curDir[length:]).replace(os.sep, '/')
+		url = (self._options['URL'] + curDir[length:]).replace(os.sep, '/')	 # change By Kidwind 移除 str() 转换，避免路径中存在中文时调用str()出错
 
 		try:
 			import urllib
@@ -1362,7 +1398,7 @@ class connector():
 
 		tar = self.__runSubProcess(['tar', '--version'])
 		gzip = self.__runSubProcess(['gzip', '--version'])
-		bzip2 = self.__runSubProcess(['bzip2', '--version'])
+		bzip2 = False # self.__runSubProcess(['bzip2', '--version'])	# change by Kidwind
 		zipc = self.__runSubProcess(['zip', '--version'])
 		unzip = self.__runSubProcess(['unzip', '--help'])
 		rar = self.__runSubProcess(['rar', '--version'], validReturn = [0, 7])
@@ -1469,6 +1505,10 @@ class connector():
 
 
 	def __checkUtf8(self, name):
+		# append By Kidwind
+		if isinstance(name, unicode):
+			return name
+		# end append By Kidwind
 		try:
 			name.decode('utf-8')
 		except UnicodeDecodeError:
@@ -1476,4 +1516,16 @@ class connector():
 			self.__debug('invalid encoding', name)
 			#name += ' (invalid encoding)'
 		return name
-
+	
+	def __toUtf8(self, text):
+		if isinstance(text, unicode):
+			return text
+		return unicode(text, 'gbk', 'replace')
+	
+	def __toByteStr(self, text):
+		if not isinstance(text, unicode):
+			return text
+		return text.encode('gbk', 'replace')
+	
+	def __listToByteStr(self, list):
+		return [self.__toByteStr(item) for item in list]
