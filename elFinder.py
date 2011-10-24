@@ -1,3 +1,4 @@
+# coding=UTF-8
 #!/usr/bin/env python
 #
 # Connector for elFinder File Manager
@@ -10,6 +11,7 @@ import os.path
 import re
 import shutil
 import time
+import sys
 from datetime import datetime
 
 class connector():
@@ -117,6 +119,13 @@ class connector():
 	def __init__(self, opts):
 		for opt in opts:
 			self._options[opt] = opts.get(opt)
+		
+		# append by Kidwind
+		# 解决 Windows 平台乱码问题，解决关键在于 os.listdir 根据传入字符串的类型（str或unicode）
+		# 决定返回目录列表的字符串类型。
+		self._options['URL'] = self.__toUnicode(self._options['URL'])
+		self._options['root'] = self.__toUnicode(self._options['root'])
+		# end append
 
 		self._response['debug'] = {}
 		self._options['URL'] = self.__checkUtf8(self._options['URL'])
@@ -175,11 +184,11 @@ class connector():
 					cmd = self._commands[self._request['cmd']]
 					func = getattr(self, '_' + self.__class__.__name__ + cmd, None)
 					if callable(func):
-						try:
+						#try:
 							func()
-						except Exception, e:
-							self._response['error'] = 'Command Failed'
-							self.__debug('exception', str(e))
+						#except Exception, e:
+						#	self._response['error'] = 'Command Failed'
+						#	self.__debug('exception', str(e))
 				else:
 					self._response['error'] = 'Unknown command'
 			else:
@@ -1057,7 +1066,7 @@ class connector():
 
 		curCwd = os.getcwd()
 		os.chdir(curDir)
-		self.__runSubProcess(cmd)
+		self.__runSubProcess(self.__cmdCompatibility(cmd))		# change by Kidwind
 		os.chdir(curCwd)
 
 		if os.path.exists(archivePath):
@@ -1098,7 +1107,7 @@ class connector():
 
 		curCwd = os.getcwd()
 		os.chdir(curDir)
-		ret = self.__runSubProcess(cmd)
+		ret = self.__runSubProcess(self.__cmdCompatibility(cmd))		# change by Kidwind
 		os.chdir(curCwd)
 
 		if ret:
@@ -1312,7 +1321,7 @@ class connector():
 	def __hash(self, path):
 		"""Hash of the path"""
 		m = hashlib.md5()
-		m.update(path)
+		m.update(self.__unicodeToUtf8(path))	# change by Kidwind 解决 md5 无法处理 unicode 类型的字符。
 		return str(m.hexdigest())
 
 
@@ -1492,6 +1501,11 @@ class connector():
 
 
 	def __checkUtf8(self, name):
+		# append By Kidwind
+		# 解决当传入 name 为unicode对象时的错误。
+		if isinstance(name, unicode):
+			return name
+		# end append By Kidwind
 		try:
 			name.decode('utf-8')
 		except UnicodeDecodeError:
@@ -1499,4 +1513,55 @@ class connector():
 			self.__debug('invalid encoding', name)
 			#name += ' (invalid encoding)'
 		return name
+	
+	# append by Kidwind
+	def __toUnicode(self, name):
+		u'''
+		if name is not unicode object, use file system encoding convert name to unicode object and return.
+		'''
+		if isinstance(name, unicode):
+			return name
+		return unicode(name, sys.getfilesystemencoding(), 'replace')
+	
+	def __unicodeToUtf8(self, name):
+		u'''
+		if name is unicode object, convert to utf8, otherwise return original name.
+		'''
+		if not isinstance(name, unicode):
+			return name
+		return name.encode('utf8')
+	
+	def __toLocalEncodeStr(self, name):
+		u'''
+		if name is unicode object, convert to file system encoding, otherwise return original name.
+		'''
+		if not isinstance(name, unicode):
+			return name
+		return name.encode(sys.getfilesystemencoding())
+	
+	def __cmdCompatibility(self, cmd):
+		u'''
+		only for windows.
+		see: http://stackoverflow.com/questions/1910275/unicode-filenames-on-windows-with-python-subprocess-popen
+		Known Issues:Can not process non-native language's archive and extract.
+		i don't know how to completely resolved this bug.
+		'''
+		if not isWindowsPlatform():
+			return cmd
+		newCmd = []
+		for c in cmd:
+			newCmd.append(self.__toLocalEncodeStr(c))
+		return newCmd
+	# end append
+	
+# append by Kidwind
+_platform = None
+def getPlatform():
+	global _platform
+	if _platform is None:
+		_platform = sys.platform
+	return _platform
 
+def isWindowsPlatform():
+	return getPlatform() == 'win32'
+# end append
