@@ -1,3 +1,4 @@
+# coding=UTF-8
 #!/usr/bin/env python
 #
 # Connector for elFinder File Manager
@@ -10,6 +11,7 @@ import os.path
 import re
 import shutil
 import time
+import sys
 from datetime import datetime
 
 class connector():
@@ -42,7 +44,10 @@ class connector():
 		},
 		'perms': {},
 		'archiveMimes': {},
-		'archivers': {},
+		'archivers': {
+			'create': {},
+			'extract': {}
+		},
 		'disabled': [],
 		'debug': False
 	}
@@ -112,17 +117,27 @@ class connector():
 	httpResponse = None
 
 	def __init__(self, opts):
-		self._time = time.time()
-		t = datetime.fromtimestamp(self._time)
-		self._today = time.mktime(datetime(t.year, t.month, t.day).timetuple())
-		self._yesterday = self._today - 86400
+		# append by Kidwind
+		# 解决直接修改类 connector 的 _options 变量，造成了不同的实例使用相同的配置，如 'tmbDir'，当初
+		# 次创建 connector 实例时，'tmbDir'初始为实例1的图片文件夹，当再创建另一个 connector 实例时，使用
+		# 的仍是第一个实例的 'tmbDir'。
+		self._options = self._options.copy()
+		# end append
+		self._options.update(opts)
+		#for opt in opts:
+		#	self._options[opt] = opts.get(opt)
+		
+		# append by Kidwind
+		# 解决 Windows 平台乱码问题，解决关键在于 os.listdir 根据传入字符串的类型（str或unicode）
+		# 决定返回目录列表的字符串类型。
+		self._options['URL'] = self.__toUnicode(self._options['URL'])
+		self._options['root'] = self.__toUnicode(self._options['root'])
+		# end append
 
 		self._response['debug'] = {}
-
-		for opt in opts:
-			self._options[opt] = opts.get(opt)
-
+		self._options['URL'] = self.__checkUtf8(self._options['URL'])
 		self._options['URL'] = self._options['URL'].rstrip('/')
+		self._options['root'] = self.__checkUtf8(self._options['root'])
 		self._options['root'] = self._options['root'].rstrip(os.sep)
 		self.__debug('URL', self._options['URL'])
 		self.__debug('root', self._options['root'])
@@ -137,8 +152,27 @@ class connector():
 				self._options['tmbDir'] = False
 
 
+	def __reset(self):
+		"""Flush per request variables"""
+		self.httpStatusCode = 0
+		self.httpHeader = {}
+		self.httpResponse = None
+		self._request = {}
+		self._response = {}
+		self._errorData = {}
+		self._form = {}
+
+		self._time = time.time()
+		t = datetime.fromtimestamp(self._time)
+		self._today = time.mktime(datetime(t.year, t.month, t.day).timetuple())
+		self._yesterday = self._today - 86400
+
+		self._response['debug'] = {}
+
+
 	def run(self, httpRequest = []):
 		"""main function"""
+		self.__reset()
 		rootOk = True
 		if not os.path.exists(self._options['root']) or self._options['root'] == '':
 			rootOk = False
@@ -177,11 +211,10 @@ class connector():
 				self._response['params'] = {
 					'dotFiles': self._options['dotFiles'],
 					'uplMaxSize': str(self._options['uploadMaxSize']) + 'M',
-					'archives': self._options['archiveMimes'],
+					'archives': self._options['archivers']['create'].keys(),
 					'extract': self._options['archivers']['extract'].keys(),
 					'url': url
 				}
-
 
 		if self._errorData:
 			self._response['errorData'] = self._errorData
@@ -259,10 +292,11 @@ class connector():
 		else:
 			path = self._options['root']
 
-			if 'target' in self._request:
+			if 'target' in self._request and self._request['target']:
 				target = self.__findDir(self._request['target'], None)
 				if not target:
-					self._response['error'] = 'Invalid parameters'
+					pass
+					# self._response['error'] = 'Invalid parameters'
 				elif not self.__isAllowed(target, 'read'):
 					self._response['error'] = 'Access denied'
 				else:
@@ -991,10 +1025,10 @@ class connector():
 		self.__checkArchivers()
 
 		if (
-			not self._options['archivers']['create'] or not 'type' in self._request
+			not self._options['archivers']['create']
+			or not 'type' in self._request
 			or not 'current' in self._request
 			or not 'targets[]' in self._request
-			or not 'name' in self._request
 			):
 			self._response['error'] = 'Invalid parameters'
 			return
@@ -1024,7 +1058,7 @@ class connector():
 
 		arc = self._options['archivers']['create'][archiveType]
 		if len(realFiles) > 1:
-			archiveName = self._request['name']
+			archiveName = 'Archive'
 		else:
 			archiveName = realFiles[0]
 		archiveName += '.' + arc['ext']
@@ -1040,7 +1074,7 @@ class connector():
 
 		curCwd = os.getcwd()
 		os.chdir(curDir)
-		self.__runSubProcess(cmd)
+		self.__runSubProcess(self.__cmdCompatibility(cmd))		# change by Kidwind
 		os.chdir(curCwd)
 
 		if os.path.exists(archivePath):
@@ -1077,11 +1111,11 @@ class connector():
 		cmd = [arc['cmd']]
 		for a in arc['argc'].split():
 			cmd.append(a)
-		cmd.append(curFile)
+		cmd.append(os.path.basename(curFile))
 
 		curCwd = os.getcwd()
 		os.chdir(curDir)
-		ret = self.__runSubProcess(cmd)
+		ret = self.__runSubProcess(self.__cmdCompatibility(cmd))		# change by Kidwind
 		os.chdir(curCwd)
 
 		if ret:
@@ -1295,14 +1329,14 @@ class connector():
 	def __hash(self, path):
 		"""Hash of the path"""
 		m = hashlib.md5()
-		m.update(path)
+		m.update(self.__unicodeToUtf8(path))	# change by Kidwind 解决 md5 无法处理 unicode 类型的字符。
 		return str(m.hexdigest())
 
 
 	def __path2url(self, path):
 		curDir = path
 		length = len(self._options['root'])
-		url = str(self._options['URL'] + curDir[length:]).replace(os.sep, '/')
+		url = self.__checkUtf8(self._options['URL'] + curDir[length:]).replace(os.sep, '/')
 
 		try:
 			import urllib
@@ -1357,8 +1391,11 @@ class connector():
 		# out, err = sp.communicate()
 		# print 'out:', out, '\nerr:', err, '\n'
 		archive = { 'create': {}, 'extract': {} }
-		c = archive['create']
-		e = archive['extract']
+
+		if 'archive' in self._options['disabled'] and 'extract' in self._options['disabled']:
+			self._options['archiveMimes'] = []
+			self._options['archivers'] = archive
+			return
 
 		tar = self.__runSubProcess(['tar', '--version'])
 		gzip = self.__runSubProcess(['gzip', '--version'])
@@ -1374,6 +1411,9 @@ class connector():
 		# tar = False
 		# tar = gzip = bzip2 = zipc = unzip = rar = unrar = False
 		# print tar, gzip, bzip2, zipc, unzip, rar, unrar, p7z, p7za, p7zr
+
+		c = archive['create']
+		e = archive['extract']
 
 		if tar:
 			mime = 'application/x-tar'
@@ -1455,8 +1495,8 @@ class connector():
 			self._sp = subprocess
 
 		try:
-			sp = self._sp.Popen(cmd, shell = False, stdout = self._sp.PIPE, stderr = self._sp.PIPE)
-			out, err = sp.communicate()
+			sp = self._sp.Popen(cmd, shell = False, stdout = self._sp.PIPE, stderr = self._sp.PIPE, stdin = self._sp.PIPE)
+			out, err = sp.communicate('')
 			ret = sp.returncode
 			# print cmd, ret, out, err
 		except:
@@ -1469,6 +1509,11 @@ class connector():
 
 
 	def __checkUtf8(self, name):
+		# append By Kidwind
+		# 解决当传入 name 为unicode对象时的错误。
+		if isinstance(name, unicode):
+			return name
+		# end append By Kidwind
 		try:
 			name.decode('utf-8')
 		except UnicodeDecodeError:
@@ -1476,4 +1521,55 @@ class connector():
 			self.__debug('invalid encoding', name)
 			#name += ' (invalid encoding)'
 		return name
+	
+	# append by Kidwind
+	def __toUnicode(self, name):
+		u'''
+		if name is not unicode object, use file system encoding convert name to unicode object and return.
+		'''
+		if isinstance(name, unicode):
+			return name
+		return unicode(name, sys.getfilesystemencoding(), 'replace')
+	
+	def __unicodeToUtf8(self, name):
+		u'''
+		if name is unicode object, convert to utf8, otherwise return original name.
+		'''
+		if not isinstance(name, unicode):
+			return name
+		return name.encode('utf8')
+	
+	def __toLocalEncodeStr(self, name):
+		u'''
+		if name is unicode object, convert to file system encoding, otherwise return original name.
+		'''
+		if not isinstance(name, unicode):
+			return name
+		return name.encode(sys.getfilesystemencoding())
+	
+	def __cmdCompatibility(self, cmd):
+		u'''
+		only for windows.
+		see: http://stackoverflow.com/questions/1910275/unicode-filenames-on-windows-with-python-subprocess-popen
+		Known Issues:Can not process non-native language's archive and extract.
+		i don't know how to completely resolved this bug.
+		'''
+		if not isWindowsPlatform():
+			return cmd
+		newCmd = []
+		for c in cmd:
+			newCmd.append(self.__toLocalEncodeStr(c))
+		return newCmd
+	# end append
+	
+# append by Kidwind
+_platform = None
+def getPlatform():
+	global _platform
+	if _platform is None:
+		_platform = sys.platform
+	return _platform
 
+def isWindowsPlatform():
+	return getPlatform() == 'win32'
+# end append
